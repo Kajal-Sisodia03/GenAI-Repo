@@ -1,0 +1,157 @@
+/**************************************************************************
+*Version 		: v1.0.0
+Author			: Kajal Sisodia
+Interface Name 	: Ondemand Scheduler for RMS Consumer
+Description 	: This scheduer flow is to process the Scheduled messages to the Ondemand Shared Service
+
+*Version History			*Change By			 	*Date				 *Change Description
+ v1.0.0					     Kajal Sisodia		    10-05-2023		      ODK-1007 : Initial Deployment
+	
+****************************************************************************/
+BROKER SCHEMA com.ey.soa.si.ondemand
+PATH com.ey.soa.si.common;
+
+DECLARE DB_Name, DB_Schema EXTERNAL CHARACTER ''; 
+DECLARE Action, Identifier,StartDate,Count,intervalV1,IgnoreMissed,AllowOverwrite EXTERNAL CHARACTER '';
+DECLARE SERVICE_LOOKUP SHARED ROW;
+DECLARE DSN_Name CHARACTER DB_Name||'.'||DB_Schema; 
+/* Module Name  : Generate_TimeoutRequest_Compute
+   Description  : This Module is to set the LocalEnviornment Variables for Reading the XML from the file location*/
+CREATE COMPUTE MODULE Generate_TimeoutRequest_Compute
+	/* 
+	* Function description goes here. 
+	* Parameters: 
+	* IN: REFERENCE parameter1 - No param here. 
+	* INOUT: INTEGER parameter2 - No param here. 
+	* OUT: - control returns as true here. 
+	* RETURNS: BOOLEAN 
+	* 
+	*/
+	DECLARE t_Current CHARACTER ;
+	--DECLARE Local_Time CURRENT_GMTTIMESTAMP;
+	DECLARE Local TIMESTAMP CURRENT_GMTTIMESTAMP ;
+	
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	
+	BEGIN
+	--Setting TrackingID into the Local Environment for timeout Request
+		 SET OutputLocalEnvironment.TimeoutRequest.Identifier = UUIDASCHAR;
+		 
+		 DECLARE rEnvMessageDetails REFERENCE TO Environment.AuditMessages.MessageMetaData;
+		 
+		  --Setting Manadatory MQMD headers for Timeout Notification node.
+		 SET OutputRoot.MQMD.Version = 1;
+		 SET OutputRoot.MQMD.MsgType = 8;
+		 SET OutputRoot.MQMD.Format  = 'MQSTR';
+		 
+		 --Populating the TimeoutRequest Message with mandatory fields
+		 SET t_Current = CAST(CAST(CURRENT_TIME AS TIMESTAMP FORMAT 'HH:mm')AS CHARACTER FORMAT 'HH:mm');
+		 
+		 
+		 IF NOT EXISTS(SERVICE_LOOKUP.[]) THEN -- SERVICE_LOOKUP_IDENTIFIER	ODS_ACTIVE_IND SCHEDULER	Y
+		 	SET SERVICE_LOOKUP.BatchDetails[] =  PASSTHRU('SELECT * FROM ' || DSN_Name || '.SERVICE_LOOKUP WHERE ODS_ACTIVE_IND  = ? AND SERVICE_LOOKUP_IDENTIFIER = ? ','Y','SCHEDULER');
+		 END IF;
+		 
+		 IF EXISTS(SERVICE_LOOKUP.BatchDetails[])THEN
+		 	 
+		 	 DECLARE rBatchDetails REFERENCE TO SERVICE_LOOKUP.BatchDetails[ > ]; 
+		 	 CREATE FIELD Environment.Variables.Batch; 
+			 DECLARE rInRefBatch REFERENCE TO Environment.Variables.Batch; 	
+			
+	       	 X:WHILE LASTMOVE(rBatchDetails) DO
+	       		
+				SET rInRefBatch.BatchTrigger      = THE(SELECT ITEM RE.LOOKUP_VALUE1 FROM rBatchDetails AS RE WHERE RE.LOOKUP_KEY1 = 'BATCH EXECUTION TIME');
+				 
+				SET rInRefBatch.Batch_Matched[] = EVAL('t_Current IN (' || rInRefBatch.BatchTrigger || ')');
+				
+		 	 	IF rInRefBatch.Batch_Matched IS TRUE THEN
+		 	 		
+		 	 		SET rInRefBatch.IntergrationNode  = THE(SELECT ITEM R.INTEGRATION_NODE FROM rBatchDetails AS R WHERE R.INTEGRATION_NODE = UCASE(SQL.BrokerName));
+					
+		 	 		IF EXISTS(rInRefBatch.IntergrationNode[])THEN
+				 
+						CALL TimoutRequest(rBatchDetails);
+		             	
+		             	IF OutputRoot.XMLNSC.TimeoutRequest.StartTime IS NULL THEN
+		             		RETURN FALSE;
+		             	ELSE
+		             		RETURN TRUE;
+		             	END IF;
+		             	
+		             	LEAVE X;
+		 	 		ELSE
+		 	 			MOVE rBatchDetails NEXTSIBLING REPEAT TYPE NAME;
+		            END IF;
+		             	
+	            ELSE 
+	              	MOVE rBatchDetails NEXTSIBLING REPEAT TYPE NAME;
+	          END IF;
+	              
+	         END WHILE; 
+		ELSE
+			SET rEnvMessageDetails.Message_Detail.Custom_Field1 = 'Batch Details are not present in Service Look up table';
+		 END IF; 
+		 
+	RETURN FALSE;
+	 	
+	END;
+	
+	CREATE PROCEDURE TimoutRequest(IN rBatchDetails REFERENCE) 
+      BEGIN
+      				
+      				 SET OutputRoot.XMLNSC.TimeoutRequest.StartTime	  	  = CAST(CAST(t_Current  AS TIMESTAMP FORMAT 'HH:mm') + CAST('1' AS INTERVAL MINUTE) AS CHARACTER FORMAT 'HH:mm:ss');
+					 SET OutputRoot.XMLNSC.TimeoutRequest.InputDirectory  = THE(SELECT ITEM R.LOOKUP_VALUE2 FROM rBatchDetails AS R WHERE R.LOOKUP_KEY2 = 'SCHEDULER DIRECTORY');
+					 SET OutputRoot.XMLNSC.TimeoutRequest.FileName	  	  = THE(SELECT ITEM R.LOOKUP_VALUE3 FROM rBatchDetails AS R WHERE R.LOOKUP_KEY3 = 'BATCH FILENAME');
+					 SET OutputRoot.XMLNSC.TimeoutRequest.InputQueue	  = THE(SELECT ITEM R.LOOKUP_VALUE4 FROM rBatchDetails AS R WHERE R.LOOKUP_KEY4 = 'INPUT QUEUE NAME');
+					 
+					 IF OutputRoot.XMLNSC.TimeoutRequest.StartTime IS NOT NULL THEN	
+			      		 SET OutputRoot.XMLNSC.TimeoutRequest.Action 		  = Action;
+						 SET OutputRoot.XMLNSC.TimeoutRequest.Identifier	  = Identifier;
+						 SET OutputRoot.XMLNSC.TimeoutRequest.StartDate 	  = StartDate;
+						 SET OutputRoot.XMLNSC.TimeoutRequest.Count		      = Count;
+						 SET OutputRoot.XMLNSC.TimeoutRequest.Interval 	      = intervalV1;
+						 SET OutputRoot.XMLNSC.TimeoutRequest.IgnoreMissed    = IgnoreMissed;
+						 SET OutputRoot.XMLNSC.TimeoutRequest.TrackingID 	  = OutputLocalEnvironment.TimeoutRequest.Identifier;
+						 SET OutputRoot.XMLNSC.TimeoutRequest.AllowOverwrite  = AllowOverwrite;
+					 END IF;
+					 
+					 DECLARE rEnvMessageDetails REFERENCE TO Environment.AuditMessages.MessageMetaData;
+				 	 SET rEnvMessageDetails.Message_Detail.Custom_Field2 = 'Batch Trigger Time in GST : '||OutputRoot.XMLNSC.TimeoutRequest.StartTime;
+				 	 SET rEnvMessageDetails.Message_Detail.Custom_Field3 = 'Batch Trigger File : '||OutputRoot.XMLNSC.TimeoutRequest.FileName;
+				
+	END;
+
+END MODULE;
+/****Module ends here *****/
+
+/* Module Name  : ReadFile_Compute
+   Description  : This Module is to set the LocalEnviornment Variables for Reading the XML from the file location*/
+CREATE COMPUTE MODULE ReadFile_Compute
+	/* 
+	* Function description goes here. 
+	* Parameters: 
+	* IN: REFERENCE parameter1 - No param here. 
+	* INOUT: INTEGER parameter2 - No param here. 
+	* OUT: - control returns as true here. 
+	* RETURNS: BOOLEAN 
+	* 
+	*/
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		 
+		 DECLARE rEnvMessageDetails REFERENCE TO Environment.AuditMessages.MessageMetaData;
+		 
+		 --Setting TrackingID into the Local Environment for timeout Request
+		 SET OutputLocalEnvironment.TimeoutRequest.Identifier = UUIDASCHAR;
+		 SET rEnvMessageDetails.Message_Detail.Custom_Field2   				 = 'Auto Triggerd Tracking ID :' || InputRoot.XMLNSC.TimeoutRequest.TrackingID;
+		 SET rEnvMessageDetails.Message_Detail.Custom_Field3   				 = 'File Directory :' || InputRoot.XMLNSC.TimeoutRequest.InputDirectory;
+		 SET OutputLocalEnvironment.Destination.File.Name 	   				 = InputRoot.XMLNSC.TimeoutRequest.FileName;
+		 SET OutputLocalEnvironment.Destination.File.Directory 				 = InputRoot.XMLNSC.TimeoutRequest.InputDirectory; -- Audit Message Detail
+		 SET OutputLocalEnvironment.Destination.MQ.DestinationData.queueName = InputRoot.XMLNSC.TimeoutRequest.InputQueue;
+		 SET OutputLocalEnvironment.File.Name								 = InputRoot.XMLNSC.TimeoutRequest.FileName;
+		 
+	RETURN TRUE;
+	END;
+
+END MODULE;
+/****Module ends here *****/
